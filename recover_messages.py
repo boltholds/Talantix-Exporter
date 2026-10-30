@@ -16,7 +16,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import httpx
 
 from archive import records, write_workbook
-from communications import DEFAULT_CHANNELS, fetch_chat, chat_query
+from communications import DEFAULT_CHANNELS, ChatNotFound, fetch_chat, chat_query
 
 
 class _StaticToken:
@@ -153,33 +153,35 @@ async def run():
         messages = read_json(original, "metadata/messages.json")
         existing_names = set(original.namelist())
         selected = persons if args.limit == 0 else persons[:args.limit]
-        supported: list[str] = []
         errors: list[dict] = []
         new_count = 0
         checked = 0
+        channel_stats = {
+            channel: {"not_found": 0, "chat_found": 0, "messages_received": 0, "errors": 0}
+            for channel in channels
+        }
 
         client = make_client()
         try:
-            if selected:
-                first_id = int(selected[0]["id"])
-                for channel in channels:
-                    try:
-                        await fetch_chat(client, first_id, channel)
-                        supported.append(channel)
-                    except (ValueError, httpx.HTTPError) as exc:
-                        errors.append({"phase":"probe", "channel":channel,
-                                       "candidate_id":str(first_id),
-                                       "error":str(exc)[:500]})
-                        print("Channel unsupported or inaccessible:", channel)
+            # A NOT_FOUND on one candidate must never disable the channel
+            # for all other candidates. Do not probe only the first candidate.
             for person in selected:
                 pid = str(person["id"])
                 new_msgs: list[dict] = []
-                for channel in supported:
+                for channel in channels:
+                    stats = channel_stats[channel]
                     try:
-                        new_msgs.extend(await fetch_chat(client, int(pid), channel))
+                        found = await fetch_chat(client, int(pid), channel)
+                        stats["chat_found"] += 1
+                        stats["messages_received"] += len(found)
+                        new_msgs.extend(found)
+                    except ChatNotFound:
+                        # Talantix did not find this candidate's specific chat.
+                        stats["not_found"] += 1
                     except (ValueError, httpx.HTTPError) as exc:
-                        errors.append({"phase":"export","channel":channel,
-                                       "candidate_id":pid,"error":str(exc)[:500]})
+                        stats["errors"] += 1
+                        errors.append({"phase": "export", "channel": channel,
+                                       "candidate_id": pid, "error": str(exc)[:500]})
                 old = messages.get(pid, [])
                 combined = merge_messages(old, new_msgs)
                 new_count += len(combined) - len(old)
@@ -190,27 +192,45 @@ async def run():
         finally:
             await client.close()
 
+        supported = [channel for channel,stats in channel_stats.items()
+                     if stats["chat_found"] > 0]
+        not_found_total = sum(stats["not_found"] for stats in channel_stats.values())
+        error_total = sum(stats["errors"] for stats in channel_stats.values())
+        print(f"Chat results: chat_found={sum(s['chat_found'] for s in channel_stats.values())}, "
+              f"not_found={not_found_total}, errors={error_total}")
+        for channel,stats in channel_stats.items():
+            print(f"  {channel}: chats={stats['chat_found']}, "
+                  f"not_found={stats['not_found']}, messages={stats['messages_received']}, "
+                  f"errors={stats['errors']}")
+
         manifest = dict(manifest)
         coverage = dict(manifest.get("coverage") or {})
         coverage["chat_recovery"] = {
-            "status": ("EXPORTED" if checked == len(persons) and
-                       len(supported) == len(channels) and not errors else "PARTIAL"),
+            "status": "PARTIAL" if checked < len(persons) or error_total else "EXPORTED",
             "count": new_count,
-            "details": (f"Checked {checked}/{len(persons)} candidates, "
-                        f"available channels: {', '.join(supported) or 'none'}, "
-                        f"failures: {len(errors)}. Other chat providers not guaranteed."),
+            "details": (f"Checked {checked}/{len(persons)} candidates across "
+                        f"{len(channels)} requested channels; "
+                        f"chats found: {sum(s['chat_found'] for s in channel_stats.values())}, "
+                        f"NOT_FOUND: {not_found_total}, errors: {error_total}. "
+                        "Other providers are not included unless explicitly requested."),
         }
         coverage["external_chats"] = {
-            "status": "PARTIAL" if supported else "NOT_EXPORTED",
+            "status": "PARTIAL",
             "count": new_count,
-            "details": "Only channels queried successfully are covered.",
+            "details": ("Queried channels: " + ", ".join(channels) +
+                        "; counts per channel: metadata/chat_recovery_report.json. "
+                        "NOT_FOUND is per-candidate; it does not mean the API channel is unsupported."),
         }
         manifest["coverage"] = coverage
         manifest["counts"] = dict(manifest.get("counts") or {})
         manifest["counts"]["Messages"] = sum(len(msg) for msg in messages.values())
         manifest["chat_recovery"] = {
-            "checked_candidates":checked,"total_candidates":len(persons),
-            "supported_channels":supported,"errors":len(errors),
+            "checked_candidates": checked,
+            "total_candidates": len(persons),
+            "requested_channels": channels,
+            "channels_with_chats": supported,
+            "not_found": not_found_total,
+            "errors": error_total,
         }
 
         with tempfile.TemporaryDirectory(prefix="talantix-messages-") as tmp:
@@ -221,7 +241,8 @@ async def run():
             args.output.parent.mkdir(parents=True, exist_ok=True)
             temp_output = args.output.with_suffix(args.output.suffix + ".tmp")
             replaced = {"Talantix_Export.xlsx", "manifest.json",
-                        "metadata/messages.json", "metadata/chat_recovery_errors.json"}
+                        "metadata/messages.json", "metadata/chat_recovery_errors.json",
+                        "metadata/chat_recovery_report.json"}
             try:
                 with ZipFile(temp_output,"w",ZIP_DEFLATED,compresslevel=6) as out:
                     for info in original.infolist():
@@ -234,6 +255,8 @@ async def run():
                     out.writestr("metadata/messages.json",json.dumps(messages,ensure_ascii=False))
                     out.writestr("metadata/chat_recovery_errors.json",
                                  json.dumps(errors,ensure_ascii=False,indent=2))
+                    out.writestr("metadata/chat_recovery_report.json",
+                                 json.dumps(channel_stats,ensure_ascii=False,indent=2))
                     root = stage/"Messages"
                     if root.exists():
                         for f in root.rglob("*"):
@@ -246,7 +269,7 @@ async def run():
             finally:
                 temp_output.unlink(missing_ok=True)
     print(f"Created: {args.output}; new messages: {new_count}; "
-          f"supported channels: {', '.join(supported) or 'none'}")
+          f"channels with chats: {', '.join(supported) or 'none'}")
 
 
 if __name__ == "__main__":
