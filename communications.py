@@ -5,6 +5,15 @@ import re
 
 # AVITO_CHAT is confirmed by the official Talantix API example.
 DEFAULT_CHANNELS = ("AVITO_CHAT",)
+
+class ChatNotFound(Exception):
+    """No chat exists for this candidate and channel."""
+
+
+class ChatApiError(ValueError):
+    """A communications API error other than NOT_FOUND."""
+
+
 ENUM_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -46,7 +55,10 @@ async def fetch_chat(client, person_id: int, channel: str) -> list[dict]:
         if not isinstance(chat, dict):
             raise ValueError("No communications item")
         if chat.get("__typename") == "PersonCommunicationError":
-            raise ValueError("Talantix communications error: " + str(chat.get("errorType", "UNKNOWN")))
+            code = str(chat.get("errorType") or "UNKNOWN")
+            if code == "NOT_FOUND":
+                raise ChatNotFound("No chat for this candidate in channel " + channel)
+            raise ChatApiError("Talantix communications error: " + code)
         if "items" not in chat:
             raise ValueError("Communication channel does not expose chat messages")
         for raw in chat.get("items") or []:
