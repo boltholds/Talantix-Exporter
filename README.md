@@ -156,3 +156,18 @@ python recover_messages.py --source .\\Talantix_CV.zip --limit 20 --output .\\Ta
 ```
 
 The source ZIP is left untouched. Inspect `metadata/chat_recovery_report.json` before processing a larger sample. If all 20 candidates yield `NOT_FOUND`, try a sample known to have an Avito chat in Talantix; random candidates from hh.ru may have no Avito conversation.
+
+## Diagnosing hh.ru conversations
+
+In a real candidate ZIP examined in October 2026, **12,419 candidates originated from hh.ru responses and 26 from hh.ru invitations**. Consequently, 20 consecutive `AVITO_CHAT` lookups returned `NOT_FOUND` and no messages. This is normal for records without Avito chats; do not make 12,445 Avito API requests unnecessarily.
+
+Talantix's web UI supports hh.ru chats, but the presence of a chat in the UI does **not** automatically prove its entire history is exposed in the GraphQL API. To identify supported API channels, use the introspection diagnostic. It prints channel enum names and aggregate counts, not access tokens or candidate contact details:
+
+```powershell
+Invoke-WebRequest "https://raw.githubusercontent.com/boltholds/Talantix-Exporter/main/inspect_channels.py" -OutFile ".\inspect_channels.py"
+python inspect_channels.py --source .\Talantix_CV.zip
+```
+
+Requires `TALANTIX_TOKEN`, or a working `TALANTIX_TOKEN_URL` with the optional local auth patch. The command is read-only. Do not try guessed channel names: confirm `PersonCommunicationChannel` values in the returned schema first. If no hh.ru chat channel is exposed, the exporter must record that limitation rather than silently treating the messages as empty.
+
+Talantix's public UI documentation explains that the hh.ru chat is synchronized with hh.ru and that multiple separate chats can exist for the same candidate in different vacancy contexts.
