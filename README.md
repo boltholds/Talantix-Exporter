@@ -140,3 +140,19 @@ python auth_status.py --verify
 No tokens appear in command arguments or the terminal output. `auth_import.py` refuses to overwrite an existing cache. The CLI expects an `auth.py` that implements `LinkToken`, `_sanitize_pair` and `_persist_tokens` from the separate AutoAuth patch.
 
 If you do **not** have a valid original JSON token pair, create a new API token in Talantix and copy the new link. Use `python auth_status.py --verify` to establish the rotating local cache immediately, before starting the full export. Keep the URL and JSON out of logs, GitHub and chat.
+
+### Candidate-specific NOT_FOUND (October 2026)
+
+Talantix may return `PersonCommunicationError(errorType: NOT_FOUND)` when a requested candidate/channel chat is absent. The exporter must **not** disable the entire channel based on the first candidate's `NOT_FOUND`. This behavior was fixed: every candidate in the requested sample is checked independently, `NOT_FOUND` is counted separately from real API errors, and the resulting archive contains `metadata/chat_recovery_report.json` with `chat_found`, `not_found`, `messages_received`, and `errors` by channel. We still cannot conclude that hh.ru messages are exported via the documented `AVITO_CHAT` example.
+
+To update only the affected files while preserving local AutoAuth patches:
+
+```powershell
+$commit = "287c270ba877918fd849e6948c26ca76da1de999"
+$base = "https://raw.githubusercontent.com/boltholds/Talantix-Exporter/$commit"
+Invoke-WebRequest "$base/communications.py" -OutFile ".\\communications.py"
+Invoke-WebRequest "$base/recover_messages.py" -OutFile ".\\recover_messages.py"
+python recover_messages.py --source .\\Talantix_CV.zip --limit 20 --output .\\Talantix_Messages_Test_v2.zip
+```
+
+The source ZIP is left untouched. Inspect `metadata/chat_recovery_report.json` before processing a larger sample. If all 20 candidates yield `NOT_FOUND`, try a sample known to have an Avito chat in Talantix; random candidates from hh.ru may have no Avito conversation.
