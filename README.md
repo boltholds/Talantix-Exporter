@@ -6,7 +6,7 @@ Read-only Talantix GraphQL exporter intended for later import into Persona AI. I
 
 ## Installation
 
-Python 3.11+:
+Python 3.11+. Excel files are generated using Python's standard library; the only third-party dependency is `httpx`.
 
 ```bash
 python -m pip install -r requirements.txt
@@ -34,7 +34,7 @@ For API schema discovery without reading candidate data, run:
 python export.py --schema-only
 ```
 
-`--workdir` selects a local staging directory (default: `.talantix_work`). Its contents contain real candidate personal data. **Use a clean workdir for each export** to prevent files from earlier runs being carried over. Do not commit tokens, XLSX, CVs, backups or local staging. Store exports encrypted, limit access, and delete staging after verification.
+`--workdir` optionally selects a staging directory. By default, each run creates a new dated subdirectory inside `.talantix_work/` to avoid mixing exports. Provided workdirs must be empty. These files contain personal data. Do not commit tokens, XLSX, CVs, backups or local staging. Store exports encrypted, limit access, and delete staging after verification.
 
 ## Archive specification
 
