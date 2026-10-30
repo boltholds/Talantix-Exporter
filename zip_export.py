@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import httpx
 from archive import assemble_archive
 from detail_queries import PROFILE, RESUMES, RESUMES_LIGHT, RESPONSES, fetch_section
+from communications import fetch_chat
 from zipfile import ZipFile
 
 URL = "https://api.talantix.ru/graphql"
@@ -125,6 +126,15 @@ async def run():
             except (httpx.HTTPError,ValueError,RuntimeError) as error:
                 errors.append(f"vacancy:{v['id']}: {error}")
         done={"profile":0,"resumes":0,"responses":0,"messages":0,"history":0}
+        avito_count = 0
+        avito_checked = 0
+        avito_supported = True
+        if persons:
+            try:
+                await fetch_chat(client, int(persons[0]["id"]), "AVITO_CHAT")
+            except (httpx.HTTPError, ValueError, RuntimeError) as error:
+                avito_supported = False
+                errors.append(f"AVITO_CHAT probe failed: {error}")
         selected=persons[:args.limit] if args.limit else persons
         for idx,person in enumerate(selected,1):
             pid=str(person["id"])
@@ -153,6 +163,22 @@ async def run():
                     done[name]+=1
                 except (httpx.HTTPError,ValueError,RuntimeError,TypeError) as error:
                     errors.append(f"{name}:{pid}: {error}")
+            if avito_supported:
+                try:
+                    chat_messages = await fetch_chat(client, candidate_id, "AVITO_CHAT")
+                    existing = messages.get(pid, [])
+                    existing_keys = {(str(m.get("channel")), str(m.get("id")))
+                                     for m in existing}
+                    for chat_msg in chat_messages:
+                        key = (str(chat_msg.get("channel")), str(chat_msg.get("id")))
+                        if key not in existing_keys:
+                            existing.append(chat_msg)
+                            existing_keys.add(key)
+                            avito_count += 1
+                    messages[pid] = existing
+                    avito_checked += 1
+                except (httpx.HTTPError, ValueError, RuntimeError) as error:
+                    errors.append(f"AVITO_CHAT:{pid}: {error}")
             if idx%25==0 or idx==len(selected):
                 print("Fetched",idx,"of",len(selected),"candidate details")
         coverage["candidate_details_and_resumes"]={
@@ -163,14 +189,19 @@ async def run():
         coverage["applications"]={"status":"PARTIAL","count":sum(len((x.get("responses") or {}).get("items") or []) for x in details.values()),
             "details":f'Response requests succeeded for {done["responses"]}/{len(persons)} candidates; original application timestamps not guaranteed.'}
         coverage["messages"]={"status":"PARTIAL","count":sum(map(len,messages.values())),
-            "details":f'Email message requests succeeded for {done["messages"]}/{len(persons)} candidates; external chats excluded.'}
+            "details":f'Email requests succeeded for {done["messages"]}/{len(persons)} candidates; plus available AVITO_CHAT messages.'}
         coverage["history"]={"status":"PARTIAL",
             "count":sum(map(len,histories.values())),
             "details":f'History requests succeeded for {done["history"]}/{len(persons)} candidates; event-specific payload not included.'}
         coverage["original_cv_files"]={"status":"UNSUPPORTED","count":0,
             "details":"Only TXT/JSON CV; downloading original PDF/DOCX not verified."}
         coverage["attachments"]={"status":"UNSUPPORTED","count":0}
-        coverage["external_chats"]={"status":"NOT_EXPORTED","count":0}
+        coverage["external_chats"]={
+            "status":"PARTIAL" if avito_supported else "NOT_EXPORTED",
+            "count":avito_count,
+            "details":f'AVITO_CHAT checked for {avito_checked}/{len(persons)} candidates; '
+                      'other chat channels are not covered.'
+        }
         coverage["errors"]={"status":"FAILED" if errors else "EXPORTED","count":len(errors),
             "details":"metadata/errors.json"}
         for filename,value in (
