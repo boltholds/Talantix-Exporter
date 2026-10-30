@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
-from artifact_tool import Workbook, SpreadsheetFile
+from xlsx_portable import write_xlsx
 
 SHEETS = {
     "Candidates": ["candidate_id","first_name","middle_name","last_name","full_name","birth_date_utc","area","source","updated_at_utc","emails","phones","other_contacts"],
@@ -101,26 +101,9 @@ def records(root, persons, vacancies, details, histories, messages, coverage):
     return rows
 
 def write_workbook(root, rows):
-    book = Workbook.create()
-    for sheet_name, headers in SHEETS.items():
-        sheet = book.worksheets.add(sheet_name)
-        sheet.get_range_by_indexes(0,0,1,len(headers)).values = [headers]
-        data = rows[sheet_name]
-        for start in range(0,len(data),250):
-            chunk = [[safe_text(cell)[:MAX_CELL] for cell in row] for row in data[start:start+250]]
-            sheet.get_range_by_indexes(start+1,0,len(chunk),len(headers)).values = chunk
-        sheet.get_range_by_indexes(0,0,1,len(headers)).format = {
-            "fill":"#22324E","font":{"bold":True,"color":"#FFFFFF"},
-            "row_height":26,"vertical_alignment":"center",
-        }
-        sheet.freeze_panes.freeze_rows(1)
-        for col, header in enumerate(headers):
-            sheet.get_range_by_indexes(0,col,1,1).format.column_width = 40 if header in ("text","cover_letter") else 22
-        if data:
-            sheet.tables.add(sheet.get_range_by_indexes(0,0,len(data)+1,len(headers)),True,"Export"+sheet_name)
-    result = root / "Talantix_Export.xlsx"
-    SpreadsheetFile.export_xlsx(book).save(str(result))
-    return result
+    path = root / "Talantix_Export.xlsx"
+    write_xlsx(path, {name: (headers, rows[name]) for name,headers in SHEETS.items()})
+    return path
 
 def assemble_archive(stage, output, persons, vacancies, details, histories, messages, coverage):
     stage = Path(stage)
