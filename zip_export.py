@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 
 import httpx
 from archive import assemble_archive
@@ -90,12 +91,14 @@ async def run():
     p = argparse.ArgumentParser()
     p.add_argument("command",nargs="?",choices=["export"],default="export")
     p.add_argument("--output",default="Talantix_Export.zip")
-    p.add_argument("--workdir",default=".talantix_work")
+    p.add_argument("--workdir",default="")
     p.add_argument("--schema-only",action="store_true")
     args = p.parse_args()
     token = os.environ.get("TALANTIX_TOKEN","")
     if not token: p.error("Set TALANTIX_TOKEN environment variable")
-    root = Path(args.workdir)
+    root = Path(args.workdir) if args.workdir else Path(".talantix_work") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
+    if root.exists() and any(root.iterdir()):
+        p.error("Workdir must be empty: choose a new --workdir for each export")
     root.mkdir(parents=True,exist_ok=True)
     client = Client(token,os.environ.get("TALANTIX_USER_AGENT","Persona AI Talantix Exporter"))
     coverage = {}
@@ -142,8 +145,9 @@ async def run():
             "details":"Original application timestamps not guaranteed; cover letters/stages included."}
         coverage["messages"]={"status":"PARTIAL","count":sum(map(len,messages.values())),
             "details":"Email messages only, not all external chats."}
-        coverage["history"]={"status":"EXPORTED" if len(histories)==len(details) else "PARTIAL",
-            "count":sum(map(len,histories.values()))}
+        coverage["history"]={"status":"PARTIAL",
+            "count":sum(map(len,histories.values())),
+            "details":"Event ID/type/time only; event-specific payload not yet exported"}
         coverage["original_cv_files"]={"status":"UNSUPPORTED","count":0,
             "details":"Only TXT/JSON CV; downloading original PDF/DOCX not verified."}
         coverage["attachments"]={"status":"UNSUPPORTED","count":0}
