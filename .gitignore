@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Talantix exporter secrets and candidate data
+.env
+.env.*
+!.env.example
+private_backup/
+talantix_backup/
+*.sqlite
+*.sqlite3
