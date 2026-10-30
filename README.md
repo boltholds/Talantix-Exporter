@@ -2,7 +2,7 @@
 
 Read-only Talantix GraphQL exporter intended for later import into Persona AI. It creates a ZIP file containing **`Talantix_Export.xlsx` at archive root**, folders `CV/<candidate_id>/`, a manifest, and an optional `metadata/` with original JSON data.
 
-**Current limitations:** account-specific API integration has not yet been verified. Resume data is currently saved as **text/JSON**, where available; this exporter does **not** download original PDF/DOCX files or message attachments. Only email history is queried, not every external chat channel. Unavailable data is marked in `Export_Info` and `manifest.json`.
+**Current limitations:** account-specific API integration has not yet been verified. Resume data is currently saved as **text/JSON**, where available; this exporter does **not** download original PDF/DOCX files or message attachments. Email messages and the documented AVITO_CHAT channel are queried. Other external chat channels are not guaranteed. Unavailable data is marked in `Export_Info` and `manifest.json`.
 
 ## Installation
 
@@ -123,3 +123,5 @@ python recover_messages.py --source .\Talantix_CV.zip --limit 20 --channels AVIT
 ```
 
 `HH_CHAT` is an **unverified probe**, not a documented supported enum. If the API rejects it, the diagnostic file reports the rejection. This does not prove whether hh.ru chat export is otherwise supported.
+
+The normal `export.py export` command now also queries `AVITO_CHAT` where the API permits it. Existing CV files are not downloaded again by `recover_messages.py`.
