@@ -125,3 +125,18 @@ python recover_messages.py --source .\Talantix_CV.zip --limit 20 --channels AVIT
 `HH_CHAT` is an **unverified probe**, not a documented supported enum. If the API rejects it, the diagnostic file reports the rejection. This does not prove whether hh.ru chat export is otherwise supported.
 
 The normal `export.py export` command now also queries `AVITO_CHAT` where the API permits it. Existing CV files are not downloaded again by `recover_messages.py`.
+
+## Restore API credentials when token URL returns HTML
+
+If `auth_status.py --verify` reports `HTTP 200 but HTML instead of JSON` and `Matching token cache: False`, the link was accepted as a URL but did not deliver the expected token JSON. Official Talantix documentation says the link expires after 30 days or after its first token refresh. A redirect, web page, or middleware can also yield HTML. Repeatedly altering the URL does not recover a consumed token pair.
+
+If you **already saved the original JSON token response** and its refresh token is still valid, set `TALANTIX_TOKEN_URL` to the **exact original** token link and import the JSON safely from the Windows clipboard:
+
+```powershell
+Get-Clipboard -Raw | python auth_import.py --stdin
+python auth_status.py --verify
+```
+
+No tokens appear in command arguments or the terminal output. `auth_import.py` refuses to overwrite an existing cache. The CLI expects an `auth.py` that implements `LinkToken`, `_sanitize_pair` and `_persist_tokens` from the separate AutoAuth patch.
+
+If you do **not** have a valid original JSON token pair, create a new API token in Talantix and copy the new link. Use `python auth_status.py --verify` to establish the rotating local cache immediately, before starting the full export. Keep the URL and JSON out of logs, GitHub and chat.
