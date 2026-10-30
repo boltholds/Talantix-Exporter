@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import inspect
 import json
 import os
 import shutil
@@ -18,26 +17,92 @@ import httpx
 
 from archive import records, write_workbook
 from communications import DEFAULT_CHANNELS, fetch_chat, chat_query
-from zip_export import Client
+
+
+class _StaticToken:
+    """Access-token-only fallback, requiring no other module."""
+    def __init__(self, token: str):
+        self._token = token
+
+    async def access_token(self) -> str:
+        return self._token
+
+    async def refresh_after_401(self, rejected: str) -> str:
+        raise ValueError("Access token rejected; configure TALANTIX_TOKEN_URL for renewal")
+
+    async def close(self) -> None:
+        pass
+
+
+class RecoveryClient:
+    """GraphQL client independent of zip_export.Client's constructor signature."""
+
+    def __init__(self, source, agent: str):
+        self._source = source
+        self._http = httpx.AsyncClient(
+            timeout=90, headers={"User-Agent": agent, "Content-Type": "application/json"},
+        )
+
+    async def query(self, query: str, variables=None) -> dict:
+        bearer = await self._source.access_token()
+        refreshed = False
+        for attempt in range(6):
+            try:
+                response = await self._http.post(
+                    "https://api.talantix.ru/graphql",
+                    json={"query": query, "variables": variables or {}},
+                    headers={"Authorization": "Bearer " + bearer},
+                )
+            except (httpx.TransportError, httpx.TimeoutException):
+                if attempt == 5:
+                    raise
+                await asyncio.sleep(min(30, 2 ** attempt))
+                continue
+            if response.status_code == 401:
+                if refreshed:
+                    raise ValueError("Talantix rejected refreshed credentials")
+                bearer = await self._source.refresh_after_401(bearer)
+                refreshed = True
+                continue
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < 5:
+                await asyncio.sleep(min(30, 2 ** attempt))
+                continue
+            response.raise_for_status()
+            result = response.json()
+            if result.get("errors"):
+                raise ValueError(str(result["errors"])[:1200])
+            data = result.get("data")
+            if not isinstance(data, dict):
+                raise ValueError("Talantix returned an invalid GraphQL response")
+            return data
+        raise RuntimeError("Talantix GraphQL retries exhausted")
+
+    async def close(self) -> None:
+        try:
+            await self._http.aclose()
+        finally:
+            await self._source.close()
 
 
 def make_client():
-    url = os.environ.get("TALANTIX_TOKEN_URL", "").strip()
+    """Reuse existing auth.py token cache without inspecting zip_export.Client."""
+    token_url = os.environ.get("TALANTIX_TOKEN_URL", "").strip()
     token = os.environ.get("TALANTIX_TOKEN", "").strip()
     agent = os.environ.get("TALANTIX_USER_AGENT", "Persona AI Talantix Exporter")
-    uses_auth = "tokens" in inspect.signature(Client.__init__).parameters
-    if uses_auth:
-        from auth import LinkToken, StaticToken
-        if url:
-            return Client(LinkToken(url, user_agent=agent), agent)
-        if token:
-            return Client(StaticToken(token), agent)
+    if token_url:
+        try:
+            from auth import LinkToken
+        except ImportError:
+            raise ValueError(
+                "auth.py is missing. Copy auth.py from Talantix AutoAuth Patch "
+                "into the repository root."
+            ) from None
+        source = LinkToken(token_url, user_agent=agent)
+    elif token:
+        source = _StaticToken(token)
+    else:
         raise ValueError("Set TALANTIX_TOKEN_URL or TALANTIX_TOKEN")
-    if url:
-        raise ValueError("Token-link patch is not installed locally; apply the auth patch")
-    if not token:
-        raise ValueError("Set TALANTIX_TOKEN")
-    return Client(token, agent)
+    return RecoveryClient(source, agent)
 
 
 def read_json(z: ZipFile, name: str):
