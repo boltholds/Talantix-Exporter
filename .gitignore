@@ -227,3 +227,11 @@ private_backup/
 talantix_backup/
 *.sqlite
 *.sqlite3
+
+# Local exports include personal information
+.talantix_work/
+Talantix_Export*.zip
+*.xlsx
+CV/
+Messages/
+metadata/
