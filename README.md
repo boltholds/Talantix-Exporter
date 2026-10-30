@@ -171,3 +171,22 @@ python inspect_channels.py --source .\Talantix_CV.zip
 Requires `TALANTIX_TOKEN`, or a working `TALANTIX_TOKEN_URL` with the optional local auth patch. The command is read-only. Do not try guessed channel names: confirm `PersonCommunicationChannel` values in the returned schema first. If no hh.ru chat channel is exposed, the exporter must record that limitation rather than silently treating the messages as empty.
 
 Talantix's public UI documentation explains that the hh.ru chat is synchronized with hh.ru and that multiple separate chats can exist for the same candidate in different vacancy contexts.
+
+## When GraphQL schema introspection is unavailable
+
+The earlier combined diagnostic could return `schema: HTTP 400; Introspection rejected by GraphQL`. That does **not** establish which communication channels are supported: the server has not returned their enum values.
+
+Starting with commit `1cf74471`, `inspect_channels.py` queries `__type` **one type at a time** and reports safe failure categories (`invalid_request`, `GRAPHQL_VALIDATION_ERROR`, `INTROSPECTION_DISABLED`, etc.), without printing any candidate data, token, or secret URL.
+
+```powershell
+$revision = "dce8c5c5ecbdf5c17a274bdd0aad84b7c22ae25b"
+Invoke-WebRequest "https://raw.githubusercontent.com/boltholds/Talantix-Exporter/$revision/inspect_channels.py" -OutFile ".\inspect_channels.py"
+python inspect_channels.py --source .\Talantix_CV.zip
+```
+
+If the new diagnostic confirms that Talantix cannot expose hh.ru chat history via the public GraphQL API, a separate official route exists in the hh.ru employer API: `GET /negotiations/{nid}/messages`. This requires **hh.ru employer OAuth credentials**, not a Talantix API token, and the hh.ru documentation warns that the negotiations message methods are deprecated and may omit newer chat functionality. Never assume that a request or response record in Talantix includes the hh.ru negotiation ID. The archive must record unmapped items rather than assigning messages to the wrong candidate.
+
+Sources:
+- https://api.talantix.ru/docs/general/
+- https://api.talantix.ru/docs/guides/examples/person_response_with_communications/
+- https://github.com/hhru/api/blob/master/docs/employer_negotiations.md
