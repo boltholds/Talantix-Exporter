@@ -95,3 +95,31 @@ python export.py export --source-archive .\Talantix_Export.zip --output Talantix
 **Local auth-patch users:** Your local `zip_export.py` may have changes for `TALANTIX_TOKEN_URL` that have not been committed to GitHub. Check `git status` before pulling updates, and keep a backup of the working authentication implementation. The stock GitHub CLI currently uses `TALANTIX_TOKEN`.
 
 A successful local smoke test does not prove all candidate details or original CV binaries can be exported. In particular, `StructuredResume.downloadLink` is documented by Talantix but downloading original files is not implemented in this version.
+
+## Recover missing chat messages without exporting CVs again
+
+The first Excel/CV snapshot can contain zero messages even if candidates have responses and chat conversations. Talantix `person.messages` is **email-only**; the separate `person.communications.item(type: AVITO_CHAT)` API exposes Avito chat messages with sender/time/text and cursor pagination.
+
+`recover_messages.py` makes a new ZIP from an existing export, keeping its original CV files and other raw records. The default retrieves AVITO_CHAT only, which is the channel confirmed by published Talantix GraphQL examples. **hh.ru chat history is not guaranteed available via this method**; an `HhResponse` event is evidence of an application, not evidence of messages. For other possible enum names, the tool can probe one candidate via `--channels`; unsupported channels are recorded instead of silently becoming empty conversations.
+
+To test 20 candidates without re-downloading the original CVs (PowerShell):
+
+```powershell
+python recover_messages.py --source .\Talantix_CV.zip --limit 20 --output .\Talantix_Messages_Test.zip
+```
+
+For all candidates:
+
+```powershell
+python recover_messages.py --source .\Talantix_CV.zip --limit 0 --output .\Talantix_With_Messages.zip
+```
+
+`TALANTIX_TOKEN` or the locally installed `auth.py` integration with `TALANTIX_TOKEN_URL` is required. Existing source ZIP remains unchanged. Inspect `metadata/chat_recovery_errors.json` and the `chat_recovery` section of `manifest.json`. Even if the recovered archive contains zero messages, check whether the candidate actually has a chat in the **tested channel** in the Talantix UI.
+
+To try another known channel identifier without changing code:
+
+```powershell
+python recover_messages.py --source .\Talantix_CV.zip --limit 20 --channels AVITO_CHAT HH_CHAT --output .\Talantix_Chat_Probe.zip
+```
+
+`HH_CHAT` is an **unverified probe**, not a documented supported enum. If the API rejects it, the diagnostic file reports the rejection. This does not prove whether hh.ru chat export is otherwise supported.
