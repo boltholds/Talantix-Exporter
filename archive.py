@@ -13,7 +13,7 @@ SHEETS = {
     "CV": ["candidate_id","resume_id","resume_type","title","created_at_utc","updated_at_utc","source_type","cv_path","metadata_path","file_status"],
     "Vacancies": ["vacancy_id","title","department","status","created_at_utc","salary_from","salary_to","currency"],
     "Applications": ["candidate_id","vacancy_id","status_id","status_name","updated_at_utc","applied_at_utc","cover_letter","response_url"],
-    "Messages": ["candidate_id","message_id","created_at_utc","channel","type","status","sender_id","subject","text","content_path"],
+    "Messages": ["candidate_id","message_id","created_at_utc","channel","type","status","sender_id","author_type","author_name","subject","text","content_path"],
     "History": ["candidate_id","event_id","event_type","event_time_utc"],
     "Export_Info": ["section","status","record_count","details"],
 }
@@ -63,7 +63,7 @@ def save_resume(root, person_id, resume):
         return path.relative_to(root).as_posix(), metadata_path, "TEXT_EXPORTED_ORIGINAL_UNAVAILABLE"
     return "", metadata_path, "METADATA_ONLY_ORIGINAL_UNAVAILABLE"
 
-def records(root, persons, vacancies, details, histories, messages, coverage):
+def records(root, persons, vacancies, details, histories, messages, coverage, *, existing_cv_names=None):
     rows = {key: [] for key in SHEETS}
     stage_ids = {}
     for vacancy in vacancies:
@@ -85,7 +85,18 @@ def records(root, persons, vacancies, details, histories, messages, coverage):
         for contact in contacts:
             rows["Contacts"].append([pid,contact.get("type"),contact.get("value")])
         for resume in items(p.get("resumes")):
-            cv_path, metadata_path, state = save_resume(root,pid,resume)
+            if existing_cv_names is None:
+                cv_path, metadata_path, state = save_resume(root,pid,resume)
+            else:
+                resume_id = str(resume.get("id", "unknown"))
+                prefix = f"CV/{pid}/resume_{resume_id}"
+                candidate_metadata = prefix + ".json"
+                candidate_text = prefix + ".txt"
+                metadata_path = candidate_metadata if candidate_metadata in existing_cv_names else ""
+                cv_path = candidate_text if candidate_text in existing_cv_names else ""
+                state = ("TEXT_EXPORTED_ORIGINAL_UNAVAILABLE" if cv_path
+                         else "METADATA_ONLY_ORIGINAL_UNAVAILABLE" if metadata_path
+                         else "MISSING_FILE")
             rows["CV"].append([pid,str(resume.get("id","")),resume.get("__typename"),resume.get("name"),utc(resume.get("createdAt")),utc(resume.get("updatedAt")),(resume.get("source") or {}).get("type"),cv_path,metadata_path,state])
         for response in items(p.get("responses")):
             if response.get("__typename") != "ResponseItem":
@@ -102,7 +113,7 @@ def records(root, persons, vacancies, details, histories, messages, coverage):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(body,encoding="utf8")
                 full_path = path.relative_to(root).as_posix()
-            rows["Messages"].append([pid,mid,utc(message.get("createdAt")),message.get("channel"),message.get("type"),message.get("status"),message.get("managerId"),message.get("subject"),body[:MAX_CELL] if not full_path else "[See text file]",full_path])
+            rows["Messages"].append([pid,mid,utc(message.get("createdAt")),message.get("channel"),message.get("type"),message.get("status"),message.get("managerId"),message.get("authorType"),message.get("authorName"),message.get("subject"),body[:MAX_CELL] if not full_path else "[See text file]",full_path])
         for event in histories.get(pid,[]):
             rows["History"].append([pid,str(event.get("id","")),event.get("__typename"),utc(event.get("eventTime"))])
     for section, info in coverage.items():
