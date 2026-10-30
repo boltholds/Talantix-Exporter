@@ -1,4 +1,4 @@
-"""Offline archive/source summary and GraphQL introspection tests."""
+"""Offline tests for Talantix archive diagnostics and split introspection."""
 import json
 import tempfile
 import unittest
@@ -9,7 +9,7 @@ from inspect_channels import archive_summary, introspect
 
 
 class ArchiveSummaryTests(unittest.TestCase):
-    def test_aggregates_hh_response_events_without_contact_info(self):
+    def test_aggregates_hh_events_without_contact_info(self):
         with tempfile.TemporaryDirectory() as folder:
             archive = Path(folder) / "fixture.zip"
             with ZipFile(archive, "w") as z:
@@ -32,32 +32,63 @@ class FakeTokens:
         return "fake-token"
 
 
+class FakeResponse:
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self.body = body
+
+    def json(self):
+        return self.body
+
+
 class FakeHttp:
-    def __init__(self):
-        self.urls = []
-    async def post(self,url,**kwargs):
-        self.urls.append(url)
-        class Response:
-            status_code = 200
-            def json(self):
-                return {"data":{
-                    "channel":{"name":"PersonCommunicationChannel",
-                               "enumValues":[{"name":"AVITO_CHAT"},{"name":"HH_CHAT"}]},
-                    "communication":{"name":"PersonCommunication","possibleTypes":[{"name":"AvitoChat"}]},
-                    "avito":{"fields":[{"name":"items"}]},
-                }}
-        return Response()
+    def __init__(self, *, deny=False):
+        self.calls = []
+        self.deny = deny
+
+    async def post(self, url, **kwargs):
+        self.calls.append((url, kwargs["json"]["query"]))
+        if self.deny:
+            if url.endswith("/schema"):
+                return FakeResponse(400, {"type": "invalid_request", "detail": "invalid request"})
+            return FakeResponse(200, {
+                "errors": [{"message": "Validation error: introspection disabled"}], "data": None
+            })
+        query = kwargs["json"]["query"]
+        if "ChannelType" in query:
+            body = {"data": {"__type": {
+                "name": "PersonCommunicationChannel",
+                "enumValues": [{"name": "AVITO_CHAT"}, {"name": "HH_CHAT"}],
+            }}}
+        else:
+            body = {"data": {"__type": {
+                "name": "PersonCommunication",
+                "possibleTypes": [{"name": "AvitoChat"}],
+            }}}
+        return FakeResponse(200, body)
 
 
 class IntrospectionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_fetches_channel_values_without_candidate_data(self):
+    async def test_fetches_channel_values_separately(self):
         client = type("FakeClient", (), {})()
         client._source = FakeTokens()
         client._http = FakeHttp()
         result = await introspect(client)
         self.assertEqual(result["status"], "OK")
         self.assertEqual(result["channels"], ["AVITO_CHAT", "HH_CHAT"])
-        self.assertEqual(len(client._http.urls), 1)
+        self.assertEqual(result["communication_types"], ["AvitoChat"])
+        self.assertEqual(len(client._http.calls), 2)
+
+    async def test_reports_prevalidation_and_graphql_errors_safely(self):
+        client = type("FakeClient", (), {})()
+        client._source = FakeTokens()
+        client._http = FakeHttp(deny=True)
+        result = await introspect(client)
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertEqual(len(result["diagnostics"]), 4)
+        self.assertTrue(any("HTTP 400 invalid_request" in x for x in result["diagnostics"]))
+        self.assertTrue(any("INTROSPECTION_DISABLED" in x for x in result["diagnostics"]))
+        self.assertFalse(any("fake-token" in x for x in result["diagnostics"]))
 
 
 if __name__ == "__main__":
