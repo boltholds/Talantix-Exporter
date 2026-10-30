@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 import httpx
 from archive import assemble_archive
+from detail_queries import PROFILE, RESUMES, RESUMES_LIGHT, RESPONSES, fetch_section
+from zipfile import ZipFile
 
 URL = "https://api.talantix.ru/graphql"
 PEOPLE = """query($after:String){persons(after:$after,first:50){items{
@@ -17,17 +19,6 @@ PEOPLE = """query($after:String){persons(after:$after,first:50){items{
 JOBS = """query($after:String){vacancies(after:$after,first:50){items{
  id title department createdAt status salary{from to currency}
 }pageInfo{hasNextPage endCursor}}}"""
-DETAIL = """query($id:Int!){person(id:$id){... on PersonItem{
- id firstName middleName lastName updatedAt birthDay area{name} source{name}
- contacts{items{type value}}
- resumes{items{__typename id name createdAt updatedAt source{type}
- ... on CustomResume{text}
- ... on StructuredResume{title skills link}
- }}
- responses{items{__typename ... on ResponseItem{
- coverLetter updatedAt url workflowStatus{... on WorkflowStatusItem{id name}}
- }}}
-}}}"""
 STAGES = """query($id:Int!){vacancy(id:$id){... on VacancyItem{
  workflowStatuses{items{id name}}
 }}}"""
@@ -93,7 +84,10 @@ async def run():
     p.add_argument("--output",default="Talantix_Export.zip")
     p.add_argument("--workdir",default="")
     p.add_argument("--schema-only",action="store_true")
+    p.add_argument("--source-archive",default="",help="Reuse base candidate/vacancy listings from a previous ZIP")
+    p.add_argument("--limit",type=int,default=0,help="Process first N candidates for API smoke testing; 0 means all")
     args = p.parse_args()
+    if args.limit < 0: p.error("--limit must be 0 or positive")
     token = os.environ.get("TALANTIX_TOKEN","")
     if not token: p.error("Set TALANTIX_TOKEN environment variable")
     root = Path(args.workdir) if args.workdir else Path(".talantix_work") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
@@ -104,15 +98,23 @@ async def run():
     coverage = {}
     try:
         try:
-            schema = await client.query(SCHEMA,schema=True)
+            schema = await client.query(SCHEMA)
             save(root/"metadata"/"graphql_schema.json",schema)
             coverage["schema"]={"status":"EXPORTED","count":len(schema.get("__schema",{}).get("types",[]))}
         except (httpx.HTTPError,ValueError,RuntimeError) as error:
             coverage["schema"]={"status":"FAILED","count":0,"details":str(error)}
         if args.schema_only:
             print(coverage["schema"]); return
-        persons = await pages(client,PEOPLE,"persons")
-        vacancies = await pages(client,JOBS,"vacancies")
+        if args.source_archive:
+            with ZipFile(args.source_archive) as prior:
+                old_manifest=json.loads(prior.read("manifest.json"))
+                if old_manifest.get("format") != "talantix-export-archive":
+                    raise ValueError("Not a Talantix export archive")
+                persons=json.loads(prior.read("metadata/persons.json"))
+                vacancies=json.loads(prior.read("metadata/vacancies.json"))
+        else:
+            persons = await pages(client,PEOPLE,"persons")
+            vacancies = await pages(client,JOBS,"vacancies")
         coverage["candidates"]={"status":"EXPORTED","count":len(persons)}
         coverage["vacancies"]={"status":"EXPORTED","count":len(vacancies)}
         details,histories,messages,errors={},{},{},[]
@@ -122,32 +124,49 @@ async def run():
                 v["workflowStatuses"]=(res.get("vacancy") or {}).get("workflowStatuses")
             except (httpx.HTTPError,ValueError,RuntimeError) as error:
                 errors.append(f"vacancy:{v['id']}: {error}")
-        for idx,person in enumerate(persons,1):
+        done={"profile":0,"resumes":0,"responses":0,"messages":0,"history":0}
+        selected=persons[:args.limit] if args.limit else persons
+        for idx,person in enumerate(selected,1):
             pid=str(person["id"])
-            try:
-                res=await client.query(DETAIL,{"id":int(pid)})
-                item=res.get("person") or {}
-                if not item.get("id"): raise ValueError("No detail")
-                details[pid]=item
-            except (httpx.HTTPError,ValueError,RuntimeError) as error:
-                errors.append(f"candidate:{pid}: {error}")
-                continue
+            candidate_id=int(pid)
+            item=dict(person)
+            details[pid]=item
+            for name,q,fallback in (
+                ("profile",PROFILE,""),
+                ("resumes",RESUMES,RESUMES_LIGHT),
+                ("responses",RESPONSES,""),
+            ):
+                try:
+                    payload=await fetch_section(client,q,candidate_id,fallback)
+                    if name=="profile":
+                        item.update(payload)
+                    else:
+                        if name not in payload:
+                            raise ValueError("Missing requested section: "+name)
+                        item[name]=payload[name]
+                    done[name]+=1
+                except (httpx.HTTPError,ValueError,RuntimeError,TypeError) as error:
+                    errors.append(f"{name}:{pid}: {error}")
             for name,q,target in (("messages",MAIL,messages),("history",HISTORY,histories)):
                 try:
-                    target[pid]=await pages(client,q,"person",{"id":int(pid)},name)
-                except (httpx.HTTPError,ValueError,RuntimeError) as error:
+                    target[pid]=await pages(client,q,"person",{"id":candidate_id},name)
+                    done[name]+=1
+                except (httpx.HTTPError,ValueError,RuntimeError,TypeError) as error:
                     errors.append(f"{name}:{pid}: {error}")
-            if idx%25==0: print("Fetched",idx,"of",len(persons))
+            if idx%25==0 or idx==len(selected):
+                print("Fetched",idx,"of",len(selected),"candidate details")
         coverage["candidate_details_and_resumes"]={
-            "status":"EXPORTED" if len(details)==len(persons) else "PARTIAL",
-            "count":len(details)}
+            "status":"EXPORTED" if done["resumes"]==len(persons) else "PARTIAL",
+            "count":done["resumes"],
+            "details":f'Candidate profiles: {done["profile"]}; resumes: {done["resumes"]}/{len(persons)}'
+        }
         coverage["applications"]={"status":"PARTIAL","count":sum(len((x.get("responses") or {}).get("items") or []) for x in details.values()),
-            "details":"Original application timestamps not guaranteed; cover letters/stages included."}
+            "details":f'Response requests succeeded for {done["responses"]}/{len(persons)} candidates; original application timestamps not guaranteed.'}
         coverage["messages"]={"status":"PARTIAL","count":sum(map(len,messages.values())),
-            "details":"Email messages only, not all external chats."}
+            "details":f'Email message requests succeeded for {done["messages"]}/{len(persons)} candidates; external chats excluded.'}
         coverage["history"]={"status":"PARTIAL",
             "count":sum(map(len,histories.values())),
-            "details":"Event ID/type/time only; event-specific payload not yet exported"}
+            "details":f'History requests succeeded for {done["history"]}/{len(persons)} candidates; event-specific payload not included.'}
         coverage["original_cv_files"]={"status":"UNSUPPORTED","count":0,
             "details":"Only TXT/JSON CV; downloading original PDF/DOCX not verified."}
         coverage["attachments"]={"status":"UNSUPPORTED","count":0}
