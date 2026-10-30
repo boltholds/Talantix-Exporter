@@ -24,56 +24,101 @@ GRAPHQL_ENDPOINTS = (
     "https://api.talantix.ru/graphql/schema",
     "https://api.talantix.ru/graphql",
 )
-INTROSPECTION = """query CommunicationTypes {
-  channel: __type(name:"PersonCommunicationChannel") {
-    name kind enumValues { name }
-  }
-  communication: __type(name:"PersonCommunication") {
-    name kind possibleTypes { name }
-  }
-  avito: __type(name:"AvitoChat") {
-    name kind fields { name }
-  }
-}"""
+# Introspection is requested as separate, low-complexity queries.
+# One rejected __type lookup must not hide the status of other lookups.
+PROBES = {
+    "channel": '''query ChannelType {
+        __type(name: "PersonCommunicationChannel") {
+            name kind enumValues { name }
+        }
+    }''',
+    "communication": '''query CommunicationType {
+        __type(name: "PersonCommunication") {
+            name kind possibleTypes { name }
+        }
+    }''',
+}
 TYPE_NAMES = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _diagnostic(response) -> str:
+    """Return a bounded API error class, never raw user/request values."""
+    status = response.status_code
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        return f"HTTP {status} (non-JSON response)"
+    if not isinstance(body, dict):
+        return f"HTTP {status} (unexpected body)"
+    if body.get("type"):
+        code = str(body["type"])
+        detail = str(body.get("detail") or "")
+        if re.fullmatch(r"[a-zA-Z0-9_ .-]{1,100}", detail):
+            return f"HTTP {status} {code}: {detail}"
+        return f"HTTP {status} {code}"
+    errors = body.get("errors") or []
+    if errors:
+        first = errors[0]
+        if not isinstance(first, dict):
+            return f"HTTP {status} GraphQL errors"
+        msg = str(first.get("message") or "")
+        ext = first.get("extensions") or {}
+        code = str(ext.get("errorType") or "") if isinstance(ext, dict) else ""
+        # GraphQL introspection errors can mention a rejected field or type.
+        # Do not print arbitrary messages or request/authorization headers.
+        if "complexity limit" in msg.lower():
+            return f"HTTP {status} GRAPHQL_COMPLEXITY_LIMIT"
+        if "introspection" in msg.lower() and ("disabled" in msg.lower() or "not allowed" in msg.lower()):
+            return f"HTTP {status} INTROSPECTION_DISABLED"
+        if "Validation error" in msg or "validation" in msg.lower():
+            return f"HTTP {status} GRAPHQL_VALIDATION_ERROR"
+        return f"HTTP {status} GRAPHQL_ERROR" + (f" ({code})" if re.fullmatch(r"[A-Z_]+", code) else "")
+    return f"HTTP {status} (no usable schema information)"
 
 
 async def introspect(client) -> dict:
     token = await client._source.access_token()
-    failures = []
+    attempts = []
     for endpoint in GRAPHQL_ENDPOINTS:
-        try:
-            response = await client._http.post(
-                endpoint,
-                json={"query": INTROSPECTION},
-                headers={"Authorization": "Bearer " + token},
-            )
-            if response.status_code in (401, 403):
-                return {"status": "AUTH_DENIED", "http_status": response.status_code}
-            if response.status_code != 200:
-                failures.append(f"{endpoint.rsplit('/',1)[-1]}: HTTP {response.status_code}")
-                continue
-            body = response.json()
-            if body.get("errors"):
-                failures.append("Introspection rejected by GraphQL")
-                continue
-            data = body.get("data") or {}
-            channel = data.get("channel") or {}
-            union = data.get("communication") or {}
-            avito = data.get("avito") or {}
+        gathered = {}
+        for key, query in PROBES.items():
+            try:
+                response = await client._http.post(
+                    endpoint,
+                    json={"query": query},
+                    headers={"Authorization": "Bearer " + token},
+                )
+                if response.status_code in (401, 403):
+                    return {"status": "AUTH_DENIED", "http_status": response.status_code}
+                if response.status_code in (429, 500, 502, 503, 504):
+                    return {"status": "API_UNAVAILABLE", "http_status": response.status_code}
+                if response.status_code != 200:
+                    attempts.append(f"{endpoint.rsplit('/',1)[-1]}/{key}: {_diagnostic(response)}")
+                    continue
+                body = response.json()
+                if body.get("errors"):
+                    attempts.append(f"{endpoint.rsplit('/',1)[-1]}/{key}: {_diagnostic(response)}")
+                    continue
+                found = (body.get("data") or {}).get("__type")
+                if not isinstance(found, dict):
+                    attempts.append(f"{endpoint.rsplit('/',1)[-1]}/{key}: TYPE_NOT_FOUND")
+                    continue
+                gathered[key] = found
+            except (ValueError, httpx.HTTPError):
+                attempts.append(f"{endpoint.rsplit('/',1)[-1]}/{key}: REQUEST_OR_JSON_ERROR")
+        if gathered:
+            channel = gathered.get("channel") or {}
+            union = gathered.get("communication") or {}
             return {
-                "status": "OK",
+                "status": "OK" if gathered.get("channel") else "PARTIAL",
                 "channel_type": channel.get("name"),
                 "channels": [item.get("name") for item in channel.get("enumValues") or []
-                             if isinstance(item, dict) and TYPE_NAMES.fullmatch(str(item.get("name","")))],
+                             if isinstance(item, dict) and TYPE_NAMES.fullmatch(str(item.get("name", "")))],
                 "communication_types": [item.get("name") for item in union.get("possibleTypes") or []
                                         if isinstance(item, dict)],
-                "avito_fields": [item.get("name") for item in avito.get("fields") or []
-                                 if isinstance(item, dict)],
+                "diagnostics": attempts,
             }
-        except (ValueError, httpx.HTTPError):
-            failures.append(f"Could not query {endpoint.rsplit('/',1)[-1]}")
-    return {"status": "UNAVAILABLE", "reason": "; ".join(failures)}
+    return {"status": "UNAVAILABLE", "diagnostics": attempts}
 
 
 def archive_summary(path: Path) -> dict:
@@ -128,11 +173,15 @@ async def main():
     finally:
         await client.close()
     print("Talantix communication schema:", data["status"])
-    if data["status"] != "OK":
-        print(data.get("reason") or ("HTTP " + str(data.get("http_status", "unknown"))))
+    for diagnostic in data.get("diagnostics", []):
+        print("  Schema probe:", diagnostic)
+    if data["status"] not in ("OK", "PARTIAL"):
+        if data.get("http_status"):
+            print("  HTTP:", data["http_status"])
+        print("No channel list was confirmed by API introspection.")
         return
     if not data["channels"]:
-        print("PersonCommunicationChannel enum was not visible in the GraphQL introspection response.")
+        print("PersonCommunicationChannel enum values are not visible.")
     else:
         print("Supported communication channel enum values:", ", ".join(data["channels"]))
     if data["communication_types"]:
