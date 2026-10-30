@@ -1,7 +1,7 @@
 """Create a ZIP containing an Excel workbook, candidate CV folders and a manifest."""
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -22,8 +22,17 @@ MAX_CELL = 32767
 def utc(value):
     if value is None or value == "":
         return ""
-    if isinstance(value, (int,float)):
-        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            # Talantix timestamp fields use Unix epoch milliseconds.
+            # Epoch arithmetic works for dates before 1970 on Windows,
+            # unlike datetime.fromtimestamp() for negative timestamps.
+            epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            return (epoch + timedelta(milliseconds=value)).isoformat()
+        except (OverflowError, ValueError, OSError):
+            # Preserve the original value for later reconciliation.
+            # Do not fail the entire export on one malformed timestamp.
+            return str(value)
     return str(value)
 
 def safe_text(value):
