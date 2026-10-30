@@ -73,3 +73,25 @@ Still to implement and verify against your API permissions: download original CV
 - [Candidates](https://api.talantix.ru/docs/guides/examples/persons/)
 - [Vacancies](https://api.talantix.ru/docs/guides/examples/vacancies/)
 - [Communications](https://api.talantix.ru/docs/guides/examples/person_response_with_communications/)
+
+## Fix for GraphQL complexity errors (October 2026)
+
+A production-sized Talantix archive showed **12,445 candidates and 26 vacancies**, but the previous combined candidate detail query failed for every candidate: `Requested operation exceeds the permitted complexity limit: 2600 > 2499`. The exporter now uses separate GraphQL queries for profile, resume and response data; resume queries automatically fall back to a minimal metadata selection on a complexity-limit error. Email and history requests run independently even when another section fails.
+
+Validate the account's schema and permissions **on only 10 candidates first**. You can reuse a previous export archive so that the 12,445 base records are not downloaded again:
+
+```powershell
+python export.py export --source-archive .\Talantix_Export.zip --limit 10 --output Talantix_Smoke_10.zip
+```
+
+Inspect `Export_Info` and `metadata/errors.json` in the new ZIP. If the first 10 are good, omit `--limit` and choose a new output filename for a full run:
+
+```powershell
+python export.py export --source-archive .\Talantix_Export.zip --output Talantix_Export_Full.zip
+```
+
+`--source-archive` reads only the previous ZIP's `metadata/persons.json` and `metadata/vacancies.json`. It still needs a valid API token to fetch the new details. The old archive remains unchanged.
+
+**Local auth-patch users:** Your local `zip_export.py` may have changes for `TALANTIX_TOKEN_URL` that have not been committed to GitHub. Check `git status` before pulling updates, and keep a backup of the working authentication implementation. The stock GitHub CLI currently uses `TALANTIX_TOKEN`.
+
+A successful local smoke test does not prove all candidate details or original CV binaries can be exported. In particular, `StructuredResume.downloadLink` is documented by Talantix but downloading original files is not implemented in this version.
