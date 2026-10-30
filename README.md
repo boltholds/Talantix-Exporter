@@ -1,47 +1,75 @@
-# Talantix Exporter — stage 1
+# Talantix Exporter — Excel/CV archive v1
 
-Read-only exporter using the official Talantix GraphQL endpoint. Saves raw API data in UTF-8 JSON, one page per file, with resumable cursor checkpoints. It does **not** modify Talantix.
+Read-only Talantix GraphQL exporter intended for later import into Persona AI. It creates a ZIP file containing **`Talantix_Export.xlsx` at archive root**, folders `CV/<candidate_id>/`, a manifest, and an optional `metadata/` with original JSON data.
 
-## Setup
+**Current limitations:** account-specific API integration has not yet been verified. Resume data is currently saved as **text/JSON**, where available; this exporter does **not** download original PDF/DOCX files or message attachments. Only email history is queried, not every external chat channel. Unavailable data is marked in `Export_Info` and `manifest.json`.
 
-Python 3.11+
+## Installation
 
-```bash
-python -m venv .venv
-source .venv/bin/activate # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-Put `TALANTIX_TOKEN` into your local environment (or use a secrets manager). Do not commit the token, print it, or send it to chat.
+Python 3.11+:
 
 ```bash
-export TALANTIX_TOKEN='your_access_token'
-export TALANTIX_USER_AGENT='Your Company (technical-contact@example.com)'
-python export.py --output ./private_backup
+python -m pip install -r requirements.txt
 ```
 
-On PowerShell:
+In PowerShell:
 
 ```powershell
-$env:TALANTIX_TOKEN = 'your_access_token'
-$env:TALANTIX_USER_AGENT = 'Your Company (technical-contact@example.com)'
-python export.py --output ./private_backup
+$env:TALANTIX_TOKEN = 'YOUR_TOKEN'
+$env:TALANTIX_USER_AGENT = 'Persona AI (contact@example.com)'
+python export.py export --output Talantix_Export.zip
 ```
 
-To discover schema alone:
+In Bash:
 
 ```bash
-python export.py --schema-only --output ./private_backup
+export TALANTIX_TOKEN='YOUR_TOKEN'
+export TALANTIX_USER_AGENT='Persona AI (contact@example.com)'
+python export.py export --output Talantix_Export.zip
 ```
 
-## Scope and limitations
+For API schema discovery without reading candidate data, run:
 
-This first working stage exports candidate basic fields (including contacts and resume labels), vacancy basics and GraphQL introspection where permitted. It does **not yet** export complete resume bodies/files, cover letters, application links/timestamps, comments, history or correspondence. Those require schema-driven implementation and verification against account-specific API permissions. Do not treat the output as a full backup until the manifest reports all required sections complete.
+```bash
+python export.py --schema-only
+```
 
-Files can contain personal information. Keep the backup in an encrypted, access-controlled directory; avoid sharing raw files publicly. Incremental export is not implemented; restarting resumes unfinished cursor pages and skips completed collections.
+`--workdir` selects a local staging directory (default: `.talantix_work`). Its contents contain real candidate personal data. **Use a clean workdir for each export** to prevent files from earlier runs being carried over. Do not commit tokens, XLSX, CVs, backups or local staging. Store exports encrypted, limit access, and delete staging after verification.
 
-Official references:
-- https://api.talantix.ru/docs/general/
-- https://api.talantix.ru/docs/guides/examples/persons/
-- https://api.talantix.ru/docs/guides/examples/vacancies/
-- https://api.talantix.ru/docs/guides/examples/person_response_with_communications/
+## Archive specification
+
+```text
+Talantix_Export.zip
+├── Talantix_Export.xlsx
+├── CV/
+│   └── <candidate_id>/
+│       ├── resume_<resume_id>.json
+│       └── resume_<resume_id>.txt   (only if text exists)
+├── Messages/                       (only for oversized email bodies)
+├── metadata/
+│   ├── graphql_schema.json          (if API permits introspection)
+│   ├── persons.json
+│   ├── vacancies.json
+│   ├── candidate_details.json
+│   ├── messages.json
+│   ├── history.json
+│   └── errors.json
+└── manifest.json
+```
+
+Excel workbook sheets: `Candidates`, `Contacts`, `CV`, `Vacancies`, `Applications`, `Messages`, `History`, `Export_Info`. Candidate and vacancy IDs are stable source keys and must be kept when loading into the Persona AI database. Dates are converted from Talantix epoch milliseconds to ISO 8601 UTC. Missing original application dates remain blank (an application update timestamp is **not** an application date).
+
+Long email messages exceeding Excel cell limits are saved to `Messages/<candidate_id>/...`. The workbook includes their relative paths. All content is treated as data, not Excel formulas.
+
+## Completeness
+
+Read both `Export_Info` and `manifest.json`: `PARTIAL`, `UNSUPPORTED` and `NOT_EXPORTED` mean the ZIP is **not a full Talantix backup**. Candidate or vacancy listing failures abort the export. Candidate-detail and optional-section failures are captured in `metadata/errors.json`.
+
+Still to implement and verify against your API permissions: download original CV files, communication attachments, all external chat types, full event payloads, reliable original application timestamps, exact full coverage of historic/archived data, and a separate Persona AI database importer.
+
+## Documentation
+
+- [Talantix API](https://api.talantix.ru/docs/general/)
+- [Candidates](https://api.talantix.ru/docs/guides/examples/persons/)
+- [Vacancies](https://api.talantix.ru/docs/guides/examples/vacancies/)
+- [Communications](https://api.talantix.ru/docs/guides/examples/person_response_with_communications/)
